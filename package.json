@@ -1,0 +1,11 @@
+{
+  "name": "try-on",
+  "version": "1.0.0",
+  "description": "Chatbot web application",
+  "scripts": {
+    "dev": "npx http-server -p 3000 -o"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
