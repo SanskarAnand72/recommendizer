@@ -1,12 +1,15 @@
 'use strict';
 /**
- * Antigravity AI — Levi's India Chatbot
+ * Levi's India Chatbot
  * Smart fashion assistant with intent detection,
  * domain gating, conversational mode, and AI product search.
  */
 
 /* ── CONFIG ── */
-const PROXY = 'http://localhost:3001';
+const PROXY =
+  window.location.hostname === "localhost"
+    ? "http://localhost:3001"
+    : "https://recommendizer.onrender.com";
 
 /* ── DOM ── */
 const cw = document.getElementById('cw');
