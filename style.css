@@ -1238,14 +1238,15 @@ img {
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  background: var(--red);
+  background: linear-gradient(135deg, var(--red) 0%, #7c1a2e 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: .72rem;
+  font-size: .7rem;
   flex-shrink: 0;
   color: #fff;
-  font-weight: 700
+  font-weight: 900;
+  letter-spacing: -.02em
 }
 
 .cw-msg-av.uav {
@@ -1253,7 +1254,7 @@ img {
 }
 
 .cw-msg-wrap {
-  max-width: 78%;
+  max-width: 88%;
   display: flex;
   flex-direction: column;
   gap: 3px
@@ -1708,6 +1709,306 @@ img {
 /* Utility */
 .hidden {
   display: none !important
+}
+
+/* ─────────────────────────────────────
+   Antigravity AI — Product Cards
+───────────────────────────────────── */
+.cw-product-card {
+  display: flex;
+  gap: 11px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  transition: box-shadow .2s, transform .2s;
+  margin-top: 4px
+}
+
+.cw-product-card:hover {
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .1);
+  transform: translateY(-2px)
+}
+
+.cw-prod-img-wrap {
+  width: 84px;
+  min-width: 84px;
+  height: 100px;
+  overflow: hidden;
+  background: #f5f5f5
+}
+
+.cw-prod-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform .3s
+}
+
+.cw-product-card:hover .cw-prod-img {
+  transform: scale(1.05)
+}
+
+.cw-prod-body {
+  flex: 1;
+  padding: 10px 12px 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0
+}
+
+.cw-prod-name-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-wrap: wrap
+}
+
+.cw-prod-name {
+  font-weight: 700;
+  font-size: .82rem;
+  color: #111;
+  line-height: 1.3;
+  flex: 1;
+  min-width: 0
+}
+
+.cw-match-badge {
+  display: inline-flex;
+  align-items: center;
+  background: #dcfce7;
+  color: #15803d;
+  font-size: .62rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 100px;
+  white-space: nowrap;
+  flex-shrink: 0
+}
+
+.cw-prod-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px
+}
+
+.cw-prod-tag {
+  background: #f3f3f3;
+  color: #555;
+  font-size: .62rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: capitalize
+}
+
+.cw-prod-summary {
+  font-size: .75rem;
+  color: #666;
+  line-height: 1.4;
+  margin: 0
+}
+
+/* Price & Rating row */
+.cw-prod-price-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 3px 0 2px;
+}
+
+.cw-prod-price {
+  font-size: .82rem;
+  font-weight: 800;
+  color: #111;
+  letter-spacing: -.2px;
+}
+
+.cw-prod-rating {
+  font-size: .72rem;
+  font-weight: 700;
+  color: #f59e0b;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.cw-prod-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--red);
+  color: #fff;
+  font-size: .72rem;
+  font-weight: 700;
+  padding: 5px 11px;
+  border-radius: 100px;
+  text-decoration: none;
+  width: fit-content;
+  margin-top: 2px;
+  transition: background .2s
+}
+
+.cw-prod-link:hover {
+  background: var(--red-dark)
+}
+
+/* Product action buttons row */
+.cw-prod-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap
+}
+
+.cw-btn-buy {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #111;
+  color: #fff;
+  font-size: .72rem;
+  font-weight: 700;
+  padding: 6px 10px;
+  border-radius: 6px;
+  text-decoration: none;
+  min-width: 72px;
+  transition: background .2s;
+  text-align: center;
+  white-space: nowrap
+}
+
+.cw-btn-buy:hover {
+  background: var(--red)
+}
+
+.cw-btn-tryon {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: #111;
+  font-size: .72rem;
+  font-weight: 700;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1.5px solid #ddd;
+  min-width: 72px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all .2s;
+  white-space: nowrap
+}
+
+.cw-btn-tryon:hover {
+  border-color: var(--red);
+  color: var(--red)
+}
+
+/* Image placeholder */
+.cw-prod-img-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f9f9f9
+}
+
+
+/* ── AI product card extras ─ */
+.cw-prod-price {
+  font-size: .8rem;
+  font-weight: 700;
+  color: #111;
+  letter-spacing: .01em
+}
+
+.cw-prod-rating {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: .72rem;
+  color: #f59e0b;
+  font-weight: 600
+}
+
+.cw-prod-rating span {
+  color: #555;
+  font-weight: 500
+}
+
+.cw-prod-reason {
+  font-size: .72rem;
+  color: #666;
+  line-height: 1.4;
+  font-style: italic;
+  margin: 2px 0
+}
+
+.cw-prod-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap
+}
+
+.cw-prod-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  background: var(--red);
+  color: #fff;
+  font-size: .72rem;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: 100px;
+  text-decoration: none;
+  border: none;
+  cursor: pointer;
+  transition: background .2s;
+  font-family: inherit
+}
+
+.cw-prod-btn-primary:hover {
+  background: var(--red-dark)
+}
+
+.cw-prod-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  color: #111;
+  font-size: .72rem;
+  font-weight: 700;
+  padding: 5px 12px;
+  border-radius: 100px;
+  border: 1.5px solid #ddd;
+  cursor: pointer;
+  transition: border-color .2s, color .2s;
+  font-family: inherit
+}
+
+.cw-prod-btn-secondary:hover {
+  border-color: var(--red);
+  color: var(--red)
+}
+
+/* AI search intro message styling */
+.cw-ai-intro {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: linear-gradient(135deg, #fef2f2, #fff5f5);
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: .72rem;
+  color: var(--red);
+  font-weight: 600;
+  margin-bottom: 8px
 }
 
 /* Responsive */

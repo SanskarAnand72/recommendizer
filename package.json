@@ -1,11 +1,18 @@
 {
-  "name": "try-on",
+  "name": "recommendizer",
   "version": "1.0.0",
-  "description": "Chatbot web application",
+  "description": "Levi's AI Fashion Chatbot with Vector Search",
   "scripts": {
-    "dev": "npx http-server -p 3000 -o"
+    "dev"   : "start \"Backend\" node --env-file=.env server.js && npx http-server -p 3000 -c-1 -o",
+    "server": "node --env-file=.env server.js",
+    "start" : "node server.js"
   },
-  "keywords": [],
+  "keywords": [
+    "chatbot",
+    "ai",
+    "pinecone",
+    "fashion"
+  ],
   "author": "",
   "license": "ISC"
 }
