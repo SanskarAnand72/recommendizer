@@ -1,294 +1,222 @@
 'use strict';
 /**
- * Pinecone Database Audit Script
+ * Pinecone Catalog Analyzer
  * ─────────────────────────────────────────────────────────────
- * Fetches raw records directly from Pinecone (no embeddings, no filters).
- * Uses Pinecone List API → Fetch API to inspect real metadata.
+ * Queries the Pinecone index using multiple semantic queries to
+ * gather a broad sample of products, deduplicates by URL, then
+ * prints a detailed breakdown of Categories, Genders, and Colors.
+ *
+ * Run:  node --env-file=.env audit_pinecone.js
+ *
+ * Required env vars:
+ *   PINECONE_API_KEY
+ *   PINECONE_HOST
+ *   HUGGINGFACE_API_KEY
  * ─────────────────────────────────────────────────────────────
- * Run: node audit_pinecone.js
  */
 
 const https = require('https');
 
-const PINECONE_KEY  = 'pcsk_6A7Vei_SyVmsSaoAAduSCjaQpgYcJWmGhoc3Hi3wyvfLo7HWTnMxLaPYqp2m7KjTqqAmnF';
-const PINECONE_HOST = 'levis-store-wqyt4q6.svc.aped-4627-b74a.pinecone.io';
+/* ── Env vars ─────────────────────────────────────────────────── */
+const PINECONE_KEY  = process.env.PINECONE_API_KEY;
+const PINECONE_HOST = process.env.PINECONE_HOST;
+const HF_KEY        = process.env.HUGGINGFACE_API_KEY;
+const HF_HOST       = 'router.huggingface.co';
+const HF_MODEL      = 'BAAI/bge-large-en-v1.5';
 
-/* ── HTTPS helper ── */
-function httpsReq(method, host, path, headers, body) {
+/* ── Startup validation ─────────────────────────────────────── */
+const missing = [
+  ['PINECONE_API_KEY',    PINECONE_KEY],
+  ['PINECONE_HOST',       PINECONE_HOST],
+  ['HUGGINGFACE_API_KEY', HF_KEY],
+].filter(([, v]) => !v).map(([k]) => k);
+
+if (missing.length) {
+  console.error('\n  ✖ Missing env vars:', missing.join(', '));
+  console.error('  Run: node --env-file=.env audit_pinecone.js\n');
+  process.exit(1);
+}
+
+/* ── HTTPS helper ─────────────────────────────────────────────── */
+function httpsPost(hostname, path, extraHeaders, body) {
   return new Promise((resolve, reject) => {
-    const payload = body ? JSON.stringify(body) : null;
-    const req = https.request(
+    const data = JSON.stringify(body);
+    const req  = https.request(
       {
-        method,
-        hostname: host,
+        hostname,
         path,
+        method : 'POST',
         headers: {
-          'Api-Key'     : headers['Api-Key'] || '',
-          'Content-Type': 'application/json',
-          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+          'Content-Type'  : 'application/json',
+          'Content-Length': Buffer.byteLength(data),
+          ...extraHeaders,
         },
       },
       res => {
-        let data = '';
-        res.on('data', c => (data += c));
+        let raw = '';
+        res.on('data', c => { raw += c; });
         res.on('end', () => {
-          try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
-          catch { resolve({ status: res.statusCode, body: data }); }
+          let parsed;
+          try { parsed = JSON.parse(raw); } catch { parsed = raw; }
+          resolve({ status: res.statusCode, body: parsed });
         });
       }
     );
     req.on('error', reject);
-    if (payload) req.write(payload);
+    req.write(data);
     req.end();
   });
 }
 
-/* ── Step 1: List vector IDs (up to 100) ── */
-async function listIds(limit = 100) {
-  console.log(`\n[Pinecone/list] Requesting up to ${limit} vector IDs...`);
-  const res = await httpsReq(
-    'GET',
-    PINECONE_HOST,
-    `/vectors/list?limit=${limit}`,
-    { 'Api-Key': PINECONE_KEY },
-    null
+/* ── HuggingFace: embed a text string ─────────────────────────── */
+async function embed(text) {
+  process.stdout.write(`  [HF] Embedding: "${text}" ... `);
+  const res = await httpsPost(
+    HF_HOST,
+    `/hf-inference/models/${HF_MODEL}/pipeline/feature-extraction`,
+    { Authorization: `Bearer ${HF_KEY}` },
+    { inputs: text, options: { wait_for_model: true } }
   );
-
-  if (res.status !== 200) {
-    console.error(`[Pinecone/list] HTTP ${res.status}:`, JSON.stringify(res.body).slice(0, 400));
-    throw new Error(`List failed with HTTP ${res.status}`);
-  }
-
-  const ids = (res.body.vectors || []).map(v => v.id);
-  console.log(`[Pinecone/list] Got ${ids.length} IDs`);
-
-  // If list endpoint not available, fall back to describe_index_stats to confirm connectivity
-  if (ids.length === 0 && res.body.vectors !== undefined) {
-    console.warn('[Pinecone/list] Empty list returned — namespace may be required or index uses different list format');
-    console.log('[Pinecone/list] Raw response:', JSON.stringify(res.body).slice(0, 300));
-  }
-
-  return ids;
+  if (res.status !== 200) throw new Error(`HF embed failed (HTTP ${res.status})`);
+  const raw    = res.body;
+  const vector = Array.isArray(raw[0]) ? raw[0] : raw;
+  console.log(`OK (dim=${vector.length})`);
+  return vector;
 }
 
-/* ── Step 2: Fetch metadata for IDs ── */
-async function fetchMetadata(ids) {
-  console.log(`\n[Pinecone/fetch] Fetching metadata for ${ids.length} vectors...`);
-  const res = await httpsReq(
-    'GET',
-    PINECONE_HOST,
-    `/vectors/fetch?ids=${ids.map(encodeURIComponent).join('&ids=')}`,
-    { 'Api-Key': PINECONE_KEY },
-    null
-  );
-
-  if (res.status !== 200) {
-    console.error(`[Pinecone/fetch] HTTP ${res.status}:`, JSON.stringify(res.body).slice(0, 400));
-    throw new Error(`Fetch failed with HTTP ${res.status}`);
-  }
-
-  const vectors = res.body.vectors || {};
-  const records = Object.values(vectors);
-  console.log(`[Pinecone/fetch] Retrieved ${records.length} records with metadata`);
-  return records;
-}
-
-/* ── Step 3: Fallback — random vector query to get 50 diverse results ── */
-async function queryRandomVector(topK = 50) {
-  console.log(`\n[Pinecone/query] Fallback: querying with random unit vector (topK=${topK})...`);
-
-  // 1024-dim random vector (BAAI/bge-large-en-v1.5 dimension)
-  const dim = 1024;
-  const vec = Array.from({ length: dim }, () => (Math.random() * 2 - 1));
-  // Normalize to unit vector
-  const mag = Math.sqrt(vec.reduce((s, v) => s + v * v, 0));
-  const unitVec = vec.map(v => v / mag);
-
-  const res = await httpsReq(
-    'POST',
+/* ── Pinecone: query with a vector ────────────────────────────── */
+async function queryPinecone(vector, topK) {
+  const res = await httpsPost(
     PINECONE_HOST,
     '/query',
     { 'Api-Key': PINECONE_KEY },
-    { vector: unitVec, topK, includeMetadata: true }
+    { vector, topK, includeMetadata: true }
   );
-
-  if (res.status !== 200) {
-    console.error(`[Pinecone/query] HTTP ${res.status}:`, JSON.stringify(res.body).slice(0, 400));
-    throw new Error(`Query failed with HTTP ${res.status}`);
-  }
-
-  const matches = res.body.matches || [];
-  console.log(`[Pinecone/query] Got ${matches.length} matches`);
-  return matches.map(m => ({ id: m.id, score: m.score, metadata: m.metadata }));
+  if (res.status !== 200) throw new Error(`Pinecone query failed (HTTP ${res.status})`);
+  return res.body?.matches || [];
 }
 
-/* ── Step 4: Analyze and print report ── */
-function analyzeRecords(records) {
-  console.log('\n' + '═'.repeat(60));
-  console.log(' PINECONE METADATA AUDIT REPORT');
-  console.log('═'.repeat(60));
+/* ── Counter helper ───────────────────────────────────────────── */
+function count(records, key) {
+  const map = {};
+  for (const r of records) {
+    const val = (r[key] || 'Unknown').toString().trim() || 'Unknown';
+    map[val] = (map[val] || 0) + 1;
+  }
+  return Object.entries(map).sort((a, b) => b[1] - a[1]);
+}
 
-  if (records.length === 0) {
-    console.error('❌ No records retrieved. Check API key and host.');
+/* ── Print table ──────────────────────────────────────────────── */
+function printTable(title, icon, entries) {
+  console.log(`\n${icon}  ${title}`);
+  console.log('─'.repeat(44));
+  if (entries.length === 0) {
+    console.log('   (none found)');
     return;
   }
-
-  console.log(`\n📦 Total records inspected: ${records.length}\n`);
-
-  // ── 1. Print all unique metadata keys found ──
-  const allKeys = new Set();
-  records.forEach(r => {
-    const md = r.metadata || {};
-    Object.keys(md).forEach(k => allKeys.add(k));
-  });
-
-  console.log('─'.repeat(60));
-  console.log('🔑 METADATA KEYS FOUND IN INDEX:');
-  console.log('─'.repeat(60));
-  [...allKeys].sort().forEach(k => console.log(`   "${k}"`));
-
-  // ── 2. Extract unique values for key fields ──
-  // Try both guessed and actual key names
-  const categoryKey = [...allKeys].find(k => k.toLowerCase().includes('categor')) || null;
-  const colorKey    = [...allKeys].find(k => k.toLowerCase().includes('color'))    || null;
-  const genderKey   = [...allKeys].find(k => k.toLowerCase().includes('gender'))   || null;
-  const nameKey     = [...allKeys].find(k => k.toLowerCase().includes('name') && !k.toLowerCase().includes('brand')) || null;
-
-  console.log('\n─'.repeat(30));
-  console.log(`📌 Mapped field names:`);
-  console.log(`   Category → "${categoryKey}"`);
-  console.log(`   Color    → "${colorKey}"`);
-  console.log(`   Gender   → "${genderKey}"`);
-  console.log(`   Name     → "${nameKey}"`);
-
-  // ── 3. Unique categories ──
-  console.log('\n' + '─'.repeat(60));
-  console.log('🏷️  UNIQUE PRODUCT CATEGORIES:');
-  console.log('─'.repeat(60));
-  const categoryCounts = {};
-  records.forEach(r => {
-    const val = (r.metadata?.[categoryKey] || 'UNKNOWN').trim();
-    categoryCounts[val] = (categoryCounts[val] || 0) + 1;
-  });
-  const sortedCats = Object.entries(categoryCounts).sort((a, b) => b[1] - a[1]);
-  sortedCats.forEach(([cat, count]) => {
-    console.log(`   ${String(count).padStart(3, ' ')}x  "${cat}"`);
-  });
-
-  // ── 4. Unique colors ──
-  console.log('\n' + '─'.repeat(60));
-  console.log('🎨 UNIQUE PRODUCT COLORS:');
-  console.log('─'.repeat(60));
-  const colorCounts = {};
-  records.forEach(r => {
-    const val = (r.metadata?.[colorKey] || 'UNKNOWN').trim();
-    colorCounts[val] = (colorCounts[val] || 0) + 1;
-  });
-  Object.entries(colorCounts).sort((a, b) => b[1] - a[1])
-    .forEach(([col, count]) => console.log(`   ${String(count).padStart(3, ' ')}x  "${col}"`));
-
-  // ── 5. Unique genders ──
-  console.log('\n' + '─'.repeat(60));
-  console.log('👤 UNIQUE GENDER VALUES:');
-  console.log('─'.repeat(60));
-  const genderCounts = {};
-  records.forEach(r => {
-    const val = (r.metadata?.[genderKey] || 'UNKNOWN').trim();
-    genderCounts[val] = (genderCounts[val] || 0) + 1;
-  });
-  Object.entries(genderCounts).sort((a, b) => b[1] - a[1])
-    .forEach(([g, count]) => console.log(`   ${String(count).padStart(3, ' ')}x  "${g}"`));
-
-  // ── 6. Shirt / T-Shirt / Top check ──
-  console.log('\n' + '─'.repeat(60));
-  console.log('🔍 SHIRT / T-SHIRT / TOP AVAILABILITY CHECK:');
-  console.log('─'.repeat(60));
-
-  const targets = ['shirt', 't-shirt', 'tshirt', 'tee', 'top', 'polo', 'tops'];
-  const found   = {};
-
-  records.forEach(r => {
-    const cat  = (r.metadata?.[categoryKey] || '').toLowerCase();
-    const name = (r.metadata?.[nameKey]     || '').toLowerCase();
-    const text = (r.metadata?.['text']      || '').toLowerCase();
-    targets.forEach(t => {
-      if (cat.includes(t) || name.includes(t) || text.includes(t)) {
-        found[t] = (found[t] || 0) + 1;
-      }
-    });
-  });
-
-  if (Object.keys(found).length === 0) {
-    console.log('\n   ❌ No shirt products found in database.');
-    console.log('   ❌ No t-shirt products found in database.');
-    console.log('   ❌ No top products found in database.');
-  } else {
-    targets.forEach(t => {
-      if (found[t]) {
-        console.log(`   ✅ "${t}" — ${found[t]} record(s) found`);
-      } else {
-        console.log(`   ❌ "${t}" — NOT FOUND in database`);
-      }
-    });
+  const maxLabel = Math.max(...entries.map(([k]) => k.length), 8);
+  const total    = entries.reduce((s, [, n]) => s + n, 0);
+  for (const [label, n] of entries) {
+    const bar = '█'.repeat(Math.max(1, Math.round((n / total) * 20)));
+    console.log(`  ${label.padEnd(maxLabel + 2)} ${String(n).padStart(4)}  ${bar}`);
   }
-
-  // ── 7. Sample raw records ──
-  console.log('\n' + '─'.repeat(60));
-  console.log('📄 SAMPLE RAW METADATA (first 5 unique products):');
-  console.log('─'.repeat(60));
-  const seenNames = new Set();
-  let printed = 0;
-  for (const r of records) {
-    const name = r.metadata?.[nameKey] || r.id;
-    if (!seenNames.has(name)) {
-      seenNames.add(name);
-      console.log(`\n[${printed + 1}] ID: ${r.id}`);
-      console.log('    Metadata:', JSON.stringify(r.metadata, null, 4).replace(/^/gm, '    ').trimStart());
-      printed++;
-      if (printed >= 5) break;
-    }
-  }
-
-  console.log('\n' + '═'.repeat(60));
-  console.log(' AUDIT COMPLETE');
-  console.log('═'.repeat(60) + '\n');
+  console.log('─'.repeat(44));
+  console.log(`  ${'TOTAL'.padEnd(maxLabel + 2)} ${String(total).padStart(4)}`);
 }
 
-/* ── MAIN ── */
+/* ── MAIN ─────────────────────────────────────────────────────── */
 (async () => {
-  console.log('\n🔍 Starting Pinecone Audit...');
-  console.log(`   Host : ${PINECONE_HOST}`);
-  console.log(`   Key  : ${PINECONE_KEY.slice(0, 12)}...`);
+  const LINE = '═'.repeat(52);
+  console.log('\n' + LINE);
+  console.log('   PINECONE CATALOG ANALYZER');
+  console.log(`   Host  : ${PINECONE_HOST}`);
+  console.log(`   Model : ${HF_MODEL}`);
+  console.log(LINE + '\n');
 
-  let records = [];
+  /* ── 1. Embed multiple queries to maximize catalog coverage ── */
+  const QUERIES = [
+    'clothing apparel fashion',
+    'men jeans trousers denim',
+    'women jeans trousers tops',
+    'shirts jackets t-shirts',
+    'casual formal wear',
+    'blue black grey jeans',
+  ];
+  const TOP_K = 500;
 
-  try {
-    // Try List + Fetch first (most accurate — gets real random samples)
-    const ids = await listIds(100);
-
-    if (ids.length > 0) {
-      // Fetch in batches of 50 (Pinecone fetch limit per request)
-      const batch = ids.slice(0, 50);
-      records = await fetchMetadata(batch);
-    }
-
-    // If list gave 0 results, fall back to random-vector query
-    if (records.length === 0) {
-      console.log('\n[Audit] List/Fetch returned 0 results. Trying random-vector query fallback...');
-      records = await queryRandomVector(50);
-    }
-
-    analyzeRecords(records);
-
-  } catch (err) {
-    console.error('\n❌ Audit failed:', err.message);
-    console.log('\n[Audit] Trying random-vector query as last resort...');
+  const allMatches = [];
+  console.log('Step 1 — Fetching vectors from Pinecone...\n');
+  for (const q of QUERIES) {
     try {
-      records = await queryRandomVector(50);
-      analyzeRecords(records);
-    } catch (err2) {
-      console.error('❌ Fallback also failed:', err2.message);
-      process.exit(1);
+      const vec     = await embed(q);
+      const matches = await queryPinecone(vec, TOP_K);
+      console.log(`         → ${matches.length} matches returned`);
+      allMatches.push(...matches);
+    } catch (err) {
+      console.warn(`  [WARN] Query "${q}" failed: ${err.message}`);
     }
   }
+
+  /* ── 2. Deduplicate by product URL ─────────────────────────── */
+  console.log('\nStep 2 — Deduplicating...');
+  const seen   = new Set();
+  const unique = [];
+  let   dupes  = 0;
+
+  for (const m of allMatches) {
+    const md  = m.metadata || {};
+    const url = (md['product URL '] || md['product URL'] || md['url'] || m.id || '').toString().trim();
+    if (!url || seen.has(url)) { dupes++; continue; }
+    seen.add(url);
+    unique.push({
+      id      : m.id,
+      name    : md['Product name']     || md['text']          || '',
+      category: md['Product Category'] || '',
+      color   : md['Product Color']    || '',
+      gender  : md['Gender']           || '',
+      image   : md['Image URL']        || '',
+      url,
+    });
+  }
+
+  console.log(`  Raw matches : ${allMatches.length}`);
+  console.log(`  Duplicates  : ${dupes}`);
+  console.log(`  Unique items: ${unique.length}`);
+
+  if (unique.length === 0) {
+    console.error('\n  ✖ No unique products found. Check PINECONE_API_KEY and PINECONE_HOST.');
+    process.exit(1);
+  }
+
+  /* ── 3. Print report ────────────────────────────────────────── */
+  console.log('\n' + LINE);
+  console.log('   CATALOG REPORT');
+  console.log(LINE);
+
+  printTable('CATEGORIES', '📦', count(unique, 'category'));
+  printTable('GENDER',     '👤', count(unique, 'gender'));
+  printTable('COLORS',     '🎨', count(unique, 'color'));
+
+  /* ── 4. Metadata field discovery ───────────────────────────── */
+  const allKeys = new Set();
+  allMatches.forEach(m => Object.keys(m.metadata || {}).forEach(k => allKeys.add(k)));
+
+  console.log('\n🔑  METADATA KEYS IN INDEX');
+  console.log('─'.repeat(44));
+  [...allKeys].sort().forEach(k => console.log(`   "${k}"`));
+
+  /* ── 5. Sample products (first 5 unique) ───────────────────── */
+  console.log('\n📄  SAMPLE PRODUCTS (first 5)');
+  console.log('─'.repeat(44));
+  unique.slice(0, 5).forEach((p, i) => {
+    console.log(`\n  [${i + 1}] ${p.name || '(no name)'}`);
+    console.log(`      Category : ${p.category || '—'}`);
+    console.log(`      Color    : ${p.color    || '—'}`);
+    console.log(`      Gender   : ${p.gender   || '—'}`);
+    console.log(`      URL      : ${p.url.slice(0, 70)}`);
+  });
+
+  console.log('\n' + LINE);
+  console.log('   AUDIT COMPLETE');
+  console.log(LINE + '\n');
 })();

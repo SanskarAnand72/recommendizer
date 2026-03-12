@@ -55,7 +55,6 @@ const PORT = process.env.PORT || 3001;
     ['GROQ_API_KEY',        CFG.groq.key],
     ['HUGGINGFACE_API_KEY', CFG.hf.key],
     ['PINECONE_API_KEY',    CFG.pinecone.key],
-    ['PINECONE_HOST',       CFG.pinecone.host],
   ];
   const missing = required.filter(([, v]) => !v || String(v).trim() === '').map(([k]) => k);
   if (missing.length) {
@@ -122,10 +121,10 @@ JSON schema:
   "occasion": "<date|party|office|wedding|casual|formal|club|birthday|null>"
 }
 
-⚠️ CRITICAL — ACTUAL STORE CATALOG:
-This store ONLY stocks: Jeans, Trousers.
-There are NO shirts, t-shirts, tops, jackets, kurtas, dresses, shorts, or any other categories.
-Any query for a product NOT in [jeans, trousers] must still be classified as product_query
+⚠️ STORE CATALOG:
+This store stocks: Jeans, Trousers, Shirts, Jackets, T-Shirts, Tops, and other Levi's clothing.
+Any clothing product query MUST be classified as product_query.
+Queries for non-clothing items (kurtas, dresses, shorts, etc.) should still be classified as product_query
 so the system can return a "not available" response with helpful suggestions.
 
 INTENT RULES:
@@ -147,12 +146,17 @@ CATEGORY DETECTION (only for product_query):
   shirt    → shirt, shirts, formal shirt, casual shirt
   tshirt   → t-shirt, tshirt, tee, polo, graphic tee
   jacket   → jacket, jackets, denim jacket, bomber, blazer
+  top      → top, tops, crop top
   dress    → dress, dresses, skirt
   kurta    → kurta, kurtas
   shorts   → shorts
   hoodie   → hoodie, hoodies, sweatshirt
-  top      → top, tops, crop top
   null     → ONLY if user mentioned no product type at all (e.g. "show me something nice")
+
+GENDER RULE: Only assign Men or Women if the user EXPLICITLY states gender.
+  Men   → man, men, male, boy, gents, his
+  Women → woman, women, female, girl, ladies, her
+  If not explicitly stated → return null (the chatbot will ask for clarification).
 
 COLOR DETECTION — extract if mentioned: black, white, blue, navy, red, grey, gray, green, brown, pink, yellow, orange, purple, beige, maroon, khaki, cream, indigo, charcoal, cobalt, burgundy. Return lowercase.
 GENDER — detect Men or Women ONLY if explicitly stated. Otherwise null.
@@ -162,7 +166,10 @@ OCCASION — for occasion_query only. Otherwise null.`;
  * groqIntent(query) → { intent, filters: { color, gender } }
  * Uses Groq LLM for reliable, context-aware intent classification.
  */
-async function groqIntent(query) {
+async function groqIntent(query, history = []) {
+  // Include recent conversation context (last 6 messages) for better follow-up classification
+  const contextMessages = history.slice(-6).map(h => ({ role: h.role, content: String(h.content) }));
+
   const res = await httpsPost(
     CFG.groq.host,
     '/openai/v1/chat/completions',
@@ -174,6 +181,7 @@ async function groqIntent(query) {
       response_format: { type: 'json_object' },
       messages       : [
         { role: 'system', content: INTENT_SYSTEM_PROMPT },
+        ...contextMessages,
         { role: 'user',   content: query },
       ],
     }
@@ -217,15 +225,20 @@ async function groqIntent(query) {
    Never shows products — that is handled by the search pipeline.
 ══════════════════════════════════════════════════════════════ */
 
-const CHAT_SYSTEM_PROMPT = `You are Antigravity AI, a fashion-focused assistant for Levi's India store.
+const CHAT_SYSTEM_PROMPT = `You are a shopping assistant for Levi's online store.
+Your job is to help users find clothing products using the store's product database.
 
 STRICT RULES:
 1. You are NOT a general-purpose AI. You ONLY discuss fashion, style, clothing, and this store.
 2. Never show, list, or name specific products — product search is handled separately.
-3. Never repeat the same phrase across different user inputs. Adapt every reply.
+3. Never repeat the same greeting or opening phrase. Adapt every reply.
 4. Keep replies concise: 1–3 sentences unless a detailed fashion explanation is needed.
 5. Tone: Friendly, modern, helpful — not robotic.
-6. NEVER ask more than 2 clarification questions total across the whole conversation.
+6. NEVER ask more than one clarifying question at a time.
+7. Use conversation history to understand follow-up queries (e.g. "black ones" = previous category in black).
+
+STORE INVENTORY:
+Jeans, Trousers, Shirts, Jackets, T-Shirts, Tops, and other Levi's clothing (Men & Women).
 
 INTENT-SPECIFIC BEHAVIOR:
 - greeting          → Warm, varied welcome. Ask what they're shopping for today. Different phrasing each time.
@@ -236,13 +249,19 @@ INTENT-SPECIFIC BEHAVIOR:
                        Keep it natural and brief. ONE question only.
 - occasion_followup → User answered your clarifying question. Now you have enough info.
                        Respond with ONE short sentence like: "Perfect! Let me find you some great options."
-                       DO NOT ask any more questions.`;
+                       DO NOT ask any more questions.
+
+NO-PRODUCT RESPONSE:
+If no products are found, respond politely and suggest another category or color.
+Example: "Sorry, I couldn't find that exact product. Would you like to see similar options instead?"`;
+
+
 
 /**
  * groqChat(query, intent) → string
  * Generates a natural language response for non-product intents.
  */
-async function groqChat(query, intent) {
+async function groqChat(query, intent, history = []) {
   const roleNote = {
     greeting          : 'The user sent a greeting. Welcome them warmly and ask what fashion product they are shopping for. Do NOT list products or prices.',
     fashion_chat      : 'The user is asking a fashion-related question. Reply conversationally and helpfully. Do NOT list or show any products.',
@@ -261,6 +280,7 @@ async function groqChat(query, intent) {
       max_tokens : 200,
       messages   : [
         { role: 'system', content: `${CHAT_SYSTEM_PROMPT}\n\nCurrent intent: ${intent}\nInstruction: ${roleNote}` },
+        ...history.slice(-10).map(h => ({ role: h.role, content: String(h.content) })),
         { role: 'user',   content: query },
       ],
     }
@@ -505,8 +525,19 @@ async function pineconeQuery(vector, topK) {
    NOTE: No Price or Rating fields exist in this index.
 ══════════════════════════════════════════════════════════════ */
 
-// Catalog ground truth (from Pinecone audit — only these categories exist in the index)
-const CATALOG_CATEGORIES = ['jeans', 'trousers'];
+// Catalog ground truth — all categories the store stocks
+const CATALOG_CATEGORIES = [
+  'jeans',
+  'trousers',
+  'shirts',
+  'jackets',
+  'tshirts',
+  'sweatshirts',
+  'sweaters',
+  'tops',
+  'shorts',
+  'footwear',
+];
 const CATALOG_COLORS     = ['blue', 'black', 'grey', 'gray', 'mint green', 'white', 'charcoal grey', 'navy blue'];
 
 // Maps a requested color word to the Title Case values stored in Pinecone's "Product Color" field
@@ -530,17 +561,26 @@ const COLOR_GROUPS = {
 
 // Maps a requested category keyword to substrings found in Pinecone's "Product Category" and "Product name" fields
 const CATEGORY_GROUPS = {
-  jeans  : ['jeans', 'denim'],
-  shirt  : ['shirt', 'shirts'],
-  'tshirt': ['t-shirt', 'tshirt', 'tee', 'polo'],
-  'tee'  : ['t-shirt', 'tshirt', 'tee', 'polo'],
-  jacket : ['jacket', 'jackets'],
-  trouser: ['trouser', 'trousers', 'chinos', 'pants'],
-  shorts : ['shorts'],
-  kurta  : ['kurta', 'kurtas'],
-  dress  : ['dress', 'dresses'],
-  // allow "t-shirt" key with hyphen too
-  'tshirt': ['t-shirt', 'tshirt', 'tee', 'polo'],
+  jeans       : ['jeans', 'denim'],
+  shirts      : ['shirt', 'shirts'],
+  shirt       : ['shirt', 'shirts'],
+  tshirts     : ['t-shirt', 'tshirt', 'tee', 'polo'],
+  tshirt      : ['t-shirt', 'tshirt', 'tee', 'polo'],
+  tee         : ['t-shirt', 'tshirt', 'tee', 'polo'],
+  jackets     : ['jacket', 'jackets'],
+  jacket      : ['jacket', 'jackets'],
+  trousers    : ['trouser', 'trousers', 'chinos', 'pants'],
+  trouser     : ['trouser', 'trousers', 'chinos', 'pants'],
+  sweatshirts : ['sweatshirt', 'sweatshirts', 'hoodie', 'hoodies'],
+  sweatshirt  : ['sweatshirt', 'sweatshirts', 'hoodie', 'hoodies'],
+  sweaters    : ['sweater', 'sweaters', 'pullover', 'knitwear'],
+  sweater     : ['sweater', 'sweaters', 'pullover', 'knitwear'],
+  tops        : ['top', 'tops', 'crop top'],
+  top         : ['top', 'tops', 'crop top'],
+  shorts      : ['shorts'],
+  footwear    : ['shoes', 'sneakers', 'footwear', 'boots'],
+  kurta       : ['kurta', 'kurtas'],
+  dress       : ['dress', 'dresses'],
 };
 
 /**
@@ -645,19 +685,34 @@ function applyFilters(matches, filters) {
   }
 
   // Step 4 — Gender filter
+  // The Pinecone index has no "Gender" metadata field.
+  // Gender is detected from the "Product name" field instead:
+  //   "Women's ..." or "Woman ..." → women
+  //   "Men's ..."  or "Men ..."   → men (must NOT match "women")
   if (filters.gender && result.length > 0) {
     const reqGender = filters.gender.trim().toLowerCase();
+
     const genderMatch = result.filter(m => {
-      const g = (m.metadata?.['Gender'] || '').trim().toLowerCase();
-      return g === reqGender || g === 'unisex';
+      const name = (m.metadata?.['Product name'] || '').toLowerCase();
+      if (reqGender === 'women') {
+        // contains "women" or "woman"
+        return name.includes('women') || name.includes('woman');
+      }
+      if (reqGender === 'men') {
+        // contains "men" or "man" but NOT "women" / "woman"
+        return (
+          (name.includes("men's") || name.includes('men ') || name.startsWith('men')) &&
+          !name.includes('women')
+        );
+      }
+      return true; // unknown gender value → no filter
     });
 
     if (genderMatch.length > 0) {
       result = genderMatch;
-      console.log(`[Filter] gender="${filters.gender}" → ${result.length} products`);
+      console.log(`[Filter] gender="${filters.gender}" (name-based) → ${result.length} products`);
     } else {
-      console.warn(`[Filter] gender="${filters.gender}" — 0 matches after gender filter. Keeping without gender filter.`);
-      // Keep result as-is — don't wipe results just because gender didn't narrow it down
+      console.warn(`[Filter] gender="${filters.gender}" — 0 name-based matches. Keeping without gender filter.`);
     }
   }
 
@@ -718,8 +773,8 @@ const server = http.createServer(async (req, res) => {
   /* ── POST /intent ────────────────────────────────────────── */
   if (req.method === 'POST' && parsed.pathname === '/intent') {
     const raw = await readBody(req);
-    let query;
-    try   { ({ query } = JSON.parse(raw)); }
+    let query, history;
+    try   { ({ query, history = [] } = JSON.parse(raw)); }
     catch { return send(res, 400, { error: 'Invalid JSON body. Expected: { query: string }' }); }
 
     if (!query || typeof query !== 'string') {
@@ -727,7 +782,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const result = await groqIntent(query);
+      const result = await groqIntent(query, Array.isArray(history) ? history : []);
       return send(res, 200, result);
     } catch (err) {
       console.error('[/intent] Fatal error:', err.message);
@@ -738,8 +793,8 @@ const server = http.createServer(async (req, res) => {
   /* ── POST /chat ──────────────────────────────────────────── */
   if (req.method === 'POST' && parsed.pathname === '/chat') {
     const raw = await readBody(req);
-    let query, intent;
-    try   { ({ query, intent } = JSON.parse(raw)); }
+    let query, intent, history;
+    try   { ({ query, intent, history = [] } = JSON.parse(raw)); }
     catch { return send(res, 400, { error: 'Invalid JSON body. Expected: { query: string, intent: string }' }); }
 
     if (!query && !intent) {
@@ -747,7 +802,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     try {
-      const response = await groqChat(query || '', intent || 'fashion_chat');
+      const response = await groqChat(query || '', intent || 'fashion_chat', Array.isArray(history) ? history : []);
       return send(res, 200, { response });
     } catch (err) {
       console.error('[/chat] Fatal error:', err.message);

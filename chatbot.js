@@ -45,6 +45,16 @@ const cwHumanBtn = document.getElementById('cwHumanBtn');
 /* ── State ── */
 const S = { open: false, flow: null, step: 0, data: {}, lastFilters: {} };
 
+/* ── Conversation history (last 10 messages for AI context) ── */
+const chatHistory = [];
+function pushHistory(role, content) {
+  // Strip HTML tags when storing bot messages
+  const text = String(content).replace(/<[^>]+>/g, '').trim();
+  if (!text) return;
+  chatHistory.push({ role, content: text });
+  if (chatHistory.length > 10) chatHistory.splice(0, chatHistory.length - 10);
+}
+
 /* ── Static data ── */
 const OFFERS = [
   { icon: '🔥', title: 'FLAT 30% OFF', desc: 'On all new arrivals & denim. Limited time!', code: 'LEVIS30', color: '#C8102E' },
@@ -100,15 +110,18 @@ async function processMessage(rawInput) {
   const input = rawInput.trim();
   if (!input) return;
 
+  // Track user message in conversation history
+  pushHistory('user', input);
+
   // Show typing while we detect intent
   showTypingIndicator();
 
   try {
-    // Step 1 — Detect intent via proxy
+    // Step 1 — Detect intent via proxy (pass history for follow-up context)
     const intentRes = await fetch(`${PROXY}/intent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: input }),
+      body: JSON.stringify({ query: input, history: chatHistory.slice(-10) }),
     });
     const { intent, filters, occasion } = await intentRes.json();
 
@@ -147,21 +160,25 @@ async function handleGreeting() {
     const res = await fetch(`${PROXY}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: 'hi', intent: 'greeting' }),
+      body: JSON.stringify({ query: 'hi', intent: 'greeting', history: chatHistory.slice(-10) }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     hideTyping();
+    pushHistory('assistant', data.response);
     addBotMsg(data.response, chips([
-      ['Jeans', 'search:jeans'],
-      ['Jackets', 'search:jackets'],
-      ['Shirts', 'search:shirts'],
-      ['Offers', 'flow:offers'],
+      ['Jeans',    'search:jeans'],
+      ['Shirts',   'search:shirts'],
+      ['Jackets',  'search:jackets'],
+      ['T-Shirts', 'search:t-shirts'],
+      ['Offers',   'flow:offers'],
     ]));
   } catch (err) {
     console.error('[handleGreeting]', err);
     hideTyping();
-    addBotMsg('Hi 👋 What are you looking for today? Jeans, jackets, or shirts?');
+    addBotMsg('Hi 👋 What are you looking for today?', chips([
+      ['Jeans', 'search:jeans'], ['Shirts', 'search:shirts'], ['Jackets', 'search:jackets'], ['Offers', 'flow:offers'],
+    ]));
   }
 }
 
@@ -184,16 +201,17 @@ async function handleOccasionQuery(input, occasion, filters = {}) {
     const res = await fetch(`${PROXY}/chat`, {
       method : 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ query: input, intent: 'occasion_query' }),
+      body   : JSON.stringify({ query: input, intent: 'occasion_query', history: chatHistory.slice(-10) }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     hideTyping();
+    pushHistory('assistant', data.response);
     addBotMsg(data.response);
   } catch (err) {
     console.error('[handleOccasionQuery]', err);
     hideTyping();
-    addBotMsg('Nice! Is this for men or women?');
+    addBotMsg('Sure — is this for Men or Women?', chips([['Men', 'gender:Men'], ['Women', 'gender:Women']]));
   }
 }
 
@@ -216,13 +234,15 @@ async function handleOccasionStep(input) {
         method : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body   : JSON.stringify({
-          query : `Occasion: ${S.data.occasion}. User said: ${input}`,
-          intent: 'occasion_followup',
+          query  : `Occasion: ${S.data.occasion}. User said: ${input}`,
+          intent : 'occasion_followup',
+          history: chatHistory.slice(-10),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       hideTyping();
+      pushHistory('assistant', data.response);
       addBotMsg(data.response + ' Let me pull up some great options now — just tell me what you like!');
     } catch (err) {
       console.error('[handleOccasionStep]', err);
@@ -242,11 +262,12 @@ async function handleFashionChat(input, intent = 'fashion_chat') {
     const res = await fetch(`${PROXY}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: input, intent }),
+      body: JSON.stringify({ query: input, intent, history: chatHistory.slice(-10) }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     hideTyping();
+    pushHistory('assistant', data.response);
     addBotMsg(data.response);
   } catch (err) {
     console.error('[handleFashionChat]', err);
@@ -257,6 +278,21 @@ async function handleFashionChat(input, intent = 'fashion_chat') {
 
 /* ── Product query handler ── */
 async function handleProductQuery(input, filters = {}) {
+  // Gender clarification — ask before searching if gender not specified
+  if (!filters.gender) {
+    hideTyping();
+    S.flow = 'gender_clarify';
+    S.data.pendingQuery   = input;
+    S.data.pendingFilters = { ...filters };
+    const clarifyMsg = 'Sure — is this for Men or Women?';
+    pushHistory('assistant', clarifyMsg);
+    addBotMsg(clarifyMsg, chips([
+      ['Men',   'gender:Men'],
+      ['Women', 'gender:Women'],
+    ]));
+    return;
+  }
+
   S.lastFilters = filters;
   try {
     const res = await fetch(`${PROXY}/search`, {
@@ -483,12 +519,12 @@ cwAskBtn.addEventListener('click', () => {
     "I'm your personal <b>Levi's AI Assistant</b>.<br><br>" +
     "Tell me what you're looking for and I'll find the perfect match.",
     chips([
-      ['Men\'s Slim Jeans',  'search:mens slim fit jeans'],
-      ['Women\'s Jeans',     'search:womens jeans'],
-      ['Black Jeans',        'search:black jeans'],
-      ['Blue Denim Jeans',   'search:blue denim jeans'],
-      ['Women\'s Trousers',  'search:womens trousers'],
-      ['Men\'s Trousers',    'search:mens trousers'],
+      ['Men\'s Jeans',      'search:mens jeans'],
+      ['Women\'s Jeans',    'search:womens jeans'],
+      ['Men\'s Shirts',     'search:mens shirts'],
+      ['Women\'s Tops',     'search:womens tops'],
+      ['Men\'s Jackets',    'search:mens jackets'],
+      ['Women\'s Trousers', 'search:womens trousers'],
     ])
   );
 });
@@ -588,6 +624,17 @@ function routeInput(input) {
     return;
   }
 
+  // ── Gender clarification chip ──
+  if (input.startsWith('gender:')) {
+    const gender  = input.slice(7);
+    const query   = S.data.pendingQuery   || '';
+    const filters = { ...(S.data.pendingFilters || {}), gender };
+    S.flow = null; S.data = {};
+    showTypingIndicator();
+    handleProductQuery(query, filters);
+    return;
+  }
+
   if (input.startsWith('flow:')) {
     const f = input.slice(5);
     if (f === 'track') { S.flow = 'track'; S.step = 1; S.data = {}; addBotMsg('Enter your <b>Order ID</b>:'); return; }
@@ -604,6 +651,25 @@ function routeInput(input) {
   if (S.flow === 'track') { handleTrack(input); return; }
   if (S.flow === 'tryon') { handleTryOnInput(input); return; }
   if (S.flow === 'human') return;
+
+  // ── Gender clarify text input (e.g. user types "men" or "women") ──
+  if (S.flow === 'gender_clarify') {
+    const gMap = {
+      men: 'Men', man: 'Men', male: 'Men', boy: 'Men', gents: 'Men', his: 'Men',
+      women: 'Women', woman: 'Women', female: 'Women', girl: 'Women', ladies: 'Women', her: 'Women',
+    };
+    const g = gMap[input.trim().toLowerCase()];
+    if (g) {
+      const query   = S.data.pendingQuery   || '';
+      const filters = { ...(S.data.pendingFilters || {}), gender: g };
+      S.flow = null; S.data = {};
+      showTypingIndicator();
+      handleProductQuery(query, filters);
+    } else {
+      addBotMsg('Sure — is this for Men or Women?', chips([['Men', 'gender:Men'], ['Women', 'gender:Women']]));
+    }
+    return;
+  }
 
   // ── Occasion flow ──
   if (S.flow === 'occasion') {
