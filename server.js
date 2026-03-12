@@ -116,23 +116,20 @@ JSON schema:
   "filters": {
     "color"   : "<detected color in lowercase, or null>",
     "gender"  : "<Men|Women|null>",
-    "category": "<jeans|trousers|null>"
+    "category": "<jeans|trousers|shirts|jacket|tshirt|sweatshirt|sweater|top|shorts|footwear|null>"
   },
   "occasion": "<date|party|office|wedding|casual|formal|club|birthday|null>"
 }
 
 ⚠️ STORE CATALOG:
-This store stocks: Jeans, Trousers, Shirts, Jackets, T-Shirts, Tops, and other Levi's clothing.
+This store stocks: Jeans, Trousers, Shirts, Jackets, T-Shirts, Sweatshirts, Sweaters, Tops, Shorts, and Footwear.
 Any clothing product query MUST be classified as product_query.
-Queries for non-clothing items (kurtas, dresses, shorts, etc.) should still be classified as product_query
-so the system can return a "not available" response with helpful suggestions.
 
 INTENT RULES:
 - greeting       : hi, hello, hey, hii, hola, namaste, good morning, etc.
 - product_query  : user explicitly names a product TYPE or uses buy/find/show/want/need/suggest
                    combined with a product, color or gender.
-                   Includes requests for shirts, jackets, etc. even though we don’t stock them —
-                   the system will handle the “not available” message.
+
 - occasion_query : user mentions occasion context WITHOUT naming a product:
                    date, party, office, wedding, birthday, casual outing, formal event, club night.
                    Also: "i have a date", "going to a party", "what should i wear to...".
@@ -342,23 +339,32 @@ Required JSON structure — output ONLY this, nothing else:
 async function groqFormat(metadataArray, searchQuery, requestedColor, requestedCategory) {
   // No results — return no_product immediately without calling Groq
   if (!metadataArray || metadataArray.length === 0) {
-    const colorPart  = requestedColor    ? `${requestedColor} ` : '';
-    const catPart    = requestedCategory ? `${requestedCategory}s` : 'products';
-    const catExists  = requestedCategory
-      ? CATALOG_CATEGORIES.some(c => requestedCategory.toLowerCase().includes(c))
+    const colorPart = requestedColor    ? `${requestedColor} ` : '';
+    // Avoid double-pluralising: "jackets" → "jackets" not "jacketss"
+    const catPart   = requestedCategory
+      ? (requestedCategory.toLowerCase().endsWith('s') ? requestedCategory : `${requestedCategory}s`)
+      : 'products';
+
+    // Bidirectional check: "jacket" matches "jackets" and vice-versa
+    const catNorm   = requestedCategory ? requestedCategory.toLowerCase().replace(/[-\s]/g, '') : '';
+    const catExists = requestedCategory
+      ? CATALOG_CATEGORIES.some(c => {
+          const cn = c.replace(/[-\s]/g, '');
+          return catNorm.includes(cn) || cn.includes(catNorm);
+        })
       : true;
 
     let message, suggestion;
     if (requestedCategory && !catExists) {
       // Category truly doesn't exist in catalog
-      message    = `We don't carry ${colorPart}${catPart} — our store currently stocks Jeans and Trousers only.`;
-      suggestion = `Would you like to see our ${colorPart}jeans collection instead?`;
+      message    = `Sorry, we don't carry ${colorPart}${catPart} in our store right now.`;
+      suggestion = `We currently stock Jeans, Jackets, Shirts, T-Shirts, Sweatshirts, Sweaters, Tops, Trousers, Shorts, and Footwear. Can I help you find something from these?`;
     } else if (requestedColor) {
       message    = `Sorry, we don't have ${colorPart}${catPart} available right now.`;
       suggestion = `Try ${requestedColor === 'black' ? 'blue' : 'black'} or grey — we have those in stock.`;
     } else {
       message    = `Sorry, we couldn't find ${catPart} matching your search right now.`;
-      suggestion = `Try browsing our jeans collection — we have Blue, Black, and Grey options.`;
+      suggestion = `Try browsing our Jeans or Jackets collection — we have great options in Blue, Black, and Grey.`;
     }
     return { type: 'no_product', message, suggestion };
   }
@@ -625,8 +631,12 @@ function applyFilters(matches, filters) {
   // If user said "shirt" we must ONLY return shirts; if "jeans" we must ONLY return jeans.
   if (filters.category) {
     // Check if the requested category is actually in the catalog
-    const catLower = filters.category.toLowerCase().replace(/[-\s]/g, '');
-    const inCatalog = CATALOG_CATEGORIES.some(c => catLower.includes(c.replace(/[-\s]/g,'')));
+    const catLower  = filters.category.toLowerCase().replace(/[-\s]/g, '');
+    // Bidirectional: "jacket" matches "jackets" and vice-versa
+    const inCatalog = CATALOG_CATEGORIES.some(c => {
+      const cn = c.replace(/[-\s]/g, '');
+      return catLower.includes(cn) || cn.includes(catLower);
+    });
     if (!inCatalog) {
       // Category doesn't exist in index at all — skip Pinecone filtering, return empty immediately
       console.warn(`[Filter] category="${filters.category}" NOT IN CATALOG. Returning empty (strict mode).`);
