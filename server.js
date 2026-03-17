@@ -222,35 +222,77 @@ async function groqIntent(query, history = []) {
    Never shows products — that is handled by the search pipeline.
 ══════════════════════════════════════════════════════════════ */
 
-const CHAT_SYSTEM_PROMPT = `You are a shopping assistant for Levi's online store.
-Your job is to help users find clothing products using the store's product database.
+const CHAT_SYSTEM_PROMPT = `You are Antigravity AI, a personal fashion stylist assistant for Levi's India store.
+Your job is to help users find clothing products AND recommend complete outfit combinations.
 
 STRICT RULES:
-1. You are NOT a general-purpose AI. You ONLY discuss fashion, style, clothing, and this store.
-2. Never show, list, or name specific products — product search is handled separately.
+1. You ONLY discuss fashion, style, clothing, and this store.
+2. Never list or name specific products — product search is handled separately.
 3. Never repeat the same greeting or opening phrase. Adapt every reply.
-4. Keep replies concise: 1–3 sentences unless a detailed fashion explanation is needed.
-5. Tone: Friendly, modern, helpful — not robotic.
+4. Keep replies concise: 1–3 sentences unless generating outfit bundles.
+5. Tone: Friendly, stylish, modern — like a real fashion stylist.
 6. NEVER ask more than one clarifying question at a time.
-7. Use conversation history to understand follow-up queries (e.g. "black ones" = previous category in black).
+7. Use conversation history to understand follow-up queries.
 
 STORE INVENTORY:
-Jeans, Trousers, Shirts, Jackets, T-Shirts, Tops, and other Levi's clothing (Men & Women).
+Jeans, Trousers, Shirts, Jackets, T-Shirts, Sweatshirts, Sweaters, Tops, Shorts, Footwear (Men & Women).
 
 INTENT-SPECIFIC BEHAVIOR:
-- greeting          → Warm, varied welcome. Ask what they're shopping for today. Different phrasing each time.
-- fashion_chat      → Helpful conversational fashion advice. Ask a clarifying follow-up if useful.
+- greeting          → Warm, varied welcome. Ask what they're shopping for or planning.
+- fashion_chat      → Helpful fashion advice. Ask a clarifying follow-up if useful.
 - off_topic         → Reply ONLY: "I'm here to help you find fashion products from our store 👕 Let me know what you're looking for."
-- occasion_query    → User mentioned an occasion (date, party, office, wedding, etc.). Ask EXACTLY ONE clarifying question.
-                       Good clarifying questions: "Is this for men or women?" or "What's the vibe — casual or dressed up?"
-                       Keep it natural and brief. ONE question only.
-- occasion_followup → User answered your clarifying question. Now you have enough info.
-                       Respond with ONE short sentence like: "Perfect! Let me find you some great options."
-                       DO NOT ask any more questions.
+- occasion_followup → User answered your clarifying question. Respond with ONE short enthusiastic sentence. DO NOT ask more questions.
 
 NO-PRODUCT RESPONSE:
 If no products are found, respond politely and suggest another category or color.
 Example: "Sorry, I couldn't find that exact product. Would you like to see similar options instead?"`;
+
+const STYLIST_SYSTEM_PROMPT = `You are Antigravity AI, a personal fashion stylist for Levi's India store.
+
+You will receive:
+1. A user style profile (season, occasion, gender, skin tone, color preference, vibe)
+2. A curated list of REAL products from the store, organized by category
+
+Your task: Build exactly 3 complete outfit bundles using ONLY the product names listed.
+
+COLOR MATCHING BY SKIN TONE:
+• Fair   → Dark shades work best (black, navy, dark indigo, charcoal, dark blue)
+• Medium → Mid-tones are ideal (mid-wash blue, grey, olive, khaki, earthy tones)
+• Dark   → Light & bright shades pop (white, cream, light blue, bright colors)
+
+SEASON LAYERING RULES:
+• Winter  → Every bundle MUST include a jacket, sweatshirt, or sweater for warmth
+• Summer  → Keep it light — no heavy layers; shirts or tshirts only for tops
+• Monsoon → Light jacket optional; prioritize shirts and tshirts
+• Mild    → Light jacket optional for evening; otherwise one top layer is enough
+
+OUTFIT BUNDLE FORMAT — use this EXACT format for all 3 bundles:
+
+✨ Option [N] — [Creative Bundle Name]
+👖 [Exact product name from the JEANS or TROUSERS list]
+👕 [Exact product name from the SHIRTS, TSHIRTS, SWEATSHIRTS, SWEATERS, or TOPS list]
+🧥 [Exact product name from the JACKETS list — include ONLY if season requires it]
+💡 Stylist note: [1–2 sentences explaining why this combination works for their skin tone, vibe, and occasion]
+
+CRITICAL RULES:
+1. Use ONLY the exact product names provided below — NEVER invent or paraphrase product names.
+2. Generate exactly 3 bundles. No more, no less.
+3. Each bundle must have 2–4 items depending on the season layering rules.
+4. Match colors to the skin tone guide above.
+5. Match the energy of each bundle to the user's vibe.
+6. Do NOT add any text after the 3rd bundle. No extra lines, no prompts, no buttons.`;
+
+/**
+ * getCurrentSeason() → 'Winter' | 'Summer' | 'Monsoon' | 'Mild'
+ * Based on Indian seasons derived from current month.
+ */
+function getCurrentSeason() {
+  const month = new Date().getMonth() + 1; // 1–12
+  if ([12, 1, 2].includes(month)) return 'Winter';
+  if ([4, 5, 6].includes(month))  return 'Summer';
+  if ([7, 8].includes(month))     return 'Monsoon';
+  return 'Mild'; // March, September, October, November
+}
 
 
 
@@ -259,13 +301,19 @@ Example: "Sorry, I couldn't find that exact product. Would you like to see simil
  * Generates a natural language response for non-product intents.
  */
 async function groqChat(query, intent, history = []) {
+  const isStylist = intent === 'stylist_bundle';
+
   const roleNote = {
     greeting          : 'The user sent a greeting. Welcome them warmly and ask what fashion product they are shopping for. Do NOT list products or prices.',
     fashion_chat      : 'The user is asking a fashion-related question. Reply conversationally and helpfully. Do NOT list or show any products.',
     off_topic         : 'The user asked something unrelated to fashion. Reply: "I\'m here to help you find fashion products from our store 👕 Let me know what you\'re looking for."',
-    occasion_query    : 'The user mentioned an occasion. Ask exactly ONE clarifying question (men or women? casual or formal?). Be natural and brief.',
     occasion_followup : 'The user just answered your clarifying question. Respond with ONE short enthusiastic sentence like "Perfect! Let me find some great options for you" — then stop. NO more questions.',
+    stylist_bundle    : 'Generate exactly 3 outfit bundle options using the EXACT emoji format from the system prompt. Follow all color-matching and vibe rules strictly.',
   }[intent] || 'Reply helpfully within the fashion domain only.';
+
+  const systemPrompt = isStylist
+    ? `${STYLIST_SYSTEM_PROMPT}\n\nInstruction: ${roleNote}`
+    : `${CHAT_SYSTEM_PROMPT}\n\nCurrent intent: ${intent}\nInstruction: ${roleNote}`;
 
   const res = await httpsPost(
     CFG.groq.host,
@@ -273,10 +321,10 @@ async function groqChat(query, intent, history = []) {
     { Authorization: `Bearer ${CFG.groq.key}` },
     {
       model      : CFG.groq.model,
-      temperature: 0.8,
-      max_tokens : 200,
+      temperature: isStylist ? 0.7 : 0.8,
+      max_tokens : isStylist ? 900 : 200,
       messages   : [
-        { role: 'system', content: `${CHAT_SYSTEM_PROMPT}\n\nCurrent intent: ${intent}\nInstruction: ${roleNote}` },
+        { role: 'system', content: systemPrompt },
         ...history.slice(-10).map(h => ({ role: h.role, content: String(h.content) })),
         { role: 'user',   content: query },
       ],
@@ -943,6 +991,113 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { success: true, message: `Thank you, ${name}. We will contact you within 24 hours.` });
   }
 
+  /* ── POST /stylist ── */
+  if (req.method === 'POST' && parsed.pathname === '/stylist') {
+    const rawBody = await readBody(req);
+    let profile;
+    try { ({ profile } = JSON.parse(rawBody)); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
+
+    const { occasion, gender, skin, colors, vibe } = profile || {};
+    if (!occasion) return send(res, 400, { error: 'Missing profile.occasion' });
+
+    const season      = getCurrentSeason();
+    const genderLabel = (gender || 'Men').toLowerCase().startsWith('w') ? 'Women' : 'Men';
+
+    // Season-appropriate categories to search
+    const SEASON_CATEGORIES = {
+      Winter : ['jeans', 'sweatshirts', 'jackets', 'sweaters', 'shirts'],
+      Summer : ['tshirts', 'shirts', 'shorts', 'jeans', 'tops'],
+      Monsoon: ['shirts', 'jeans', 'tshirts', 'jackets'],
+      Mild   : ['jeans', 'shirts', 'jackets', 'tshirts', 'trousers'],
+    };
+    const categoriesToSearch = [...(SEASON_CATEGORIES[season] || SEASON_CATEGORIES.Mild)];
+    if (genderLabel === 'Women' && !categoriesToSearch.includes('tops')) {
+      categoriesToSearch.push('tops');
+    }
+
+    console.log(`[/stylist] season=${season} gender=${genderLabel} categories=${categoriesToSearch.join(',')}`);
+
+    // Run all category searches in parallel
+    const searchResults = await Promise.allSettled(
+      categoriesToSearch.map(async (cat) => {
+        const q      = `${genderLabel} ${cat} for ${occasion}`;
+        const vector = await hfEmbed(q);
+        const matches = await pineconeQuery(vector, 30);
+        const filtered = applyFilters(matches, { category: cat, gender: genderLabel });
+        return { cat, products: filtered.slice(0, 4) };
+      })
+    );
+
+    // Aggregate into a pool keyed by category
+    const pool = {};
+    for (const r of searchResults) {
+      if (r.status === 'fulfilled' && r.value.products.length > 0) {
+        pool[r.value.cat] = r.value.products.map(m => ({
+          name : m.metadata?.['Product name']  || '',
+          color: m.metadata?.['Product Color'] || '',
+          image: m.metadata?.['Image URL']     || '',
+          url  : (m.metadata?.['product URL '] || m.metadata?.['product URL'] || '').trim(),
+        })).filter(p => p.name);
+      }
+    }
+
+    // Format pool as readable text for Groq
+    const poolText = Object.entries(pool)
+      .map(([cat, items]) =>
+        `[${cat.toUpperCase()}]\n${items.map(i => `• ${i.name}${i.color ? ` — ${i.color}` : ''}`).join('\n')}`
+      ).join('\n\n');
+
+    if (!poolText.trim()) {
+      return send(res, 200, {
+        response: `Sorry, I couldn't find enough products for a ${occasion} outfit right now. Try browsing our collections!`,
+        season,
+        pool: {},
+      });
+    }
+
+    const profileText = [
+      `Season: ${season}`,
+      `Occasion: ${occasion}`,
+      `Gender: ${genderLabel}`,
+      `Skin tone: ${skin    || 'Medium'}`,
+      `Color preference: ${colors || 'Both'}`,
+      `Vibe: ${vibe || 'Stylish'}`,
+    ].join(' | ');
+
+    const userMsg = `USER PROFILE: ${profileText}\n\n=== AVAILABLE PRODUCTS ===\n\n${poolText}\n\nBuild 3 outfit bundles using only the products listed above.`;
+
+    let groqRes;
+    try {
+      groqRes = await httpsPost(
+        CFG.groq.host,
+        '/openai/v1/chat/completions',
+        { Authorization: `Bearer ${CFG.groq.key}` },
+        {
+          model      : CFG.groq.model,
+          temperature: 0.7,
+          max_tokens : 1000,
+          messages   : [
+            { role: 'system', content: STYLIST_SYSTEM_PROMPT },
+            { role: 'user',   content: userMsg },
+          ],
+        }
+      );
+    } catch (err) {
+      console.error('[/stylist] Groq failed:', err.message);
+      return send(res, 502, { error: 'Groq failed', detail: err.message });
+    }
+
+    if (groqRes.status !== 200) {
+      console.error('[/stylist] Groq HTTP error:', groqRes.status, JSON.stringify(groqRes.body).slice(0, 300));
+      return send(res, 502, { error: 'Groq returned error', detail: groqRes.body });
+    }
+
+    const bundleText = groqRes.body?.choices?.[0]?.message?.content?.trim() || '';
+    console.log(`[/stylist] Generated ${bundleText.length} chars of outfit bundles`);
+
+    return send(res, 200, { response: bundleText, season, pool });
+  }
+
   /* ── POST /debug  (temp — returns raw Pinecone metadata) ── */
   if (req.method === 'POST' && parsed.pathname === '/debug') {
     const raw = await readBody(req);
@@ -958,6 +1113,65 @@ const server = http.createServer(async (req, res) => {
       });
     } catch (err) {
       return send(res, 500, { error: err.message });
+    }
+  }
+
+  /* ── POST /tryon  (proxy → n8n webhook at localhost:5678) ── */
+  if (req.method === 'POST' && parsed.pathname === '/tryon') {
+    const raw = await readBody(req);
+    let user_image, product_image;
+    try { ({ user_image, product_image } = JSON.parse(raw)); }
+    catch { return send(res, 400, { error: 'Invalid JSON. Expected: { user_image, product_image }' }); }
+
+    if (!user_image) return send(res, 400, { error: 'Missing user_image' });
+
+    const N8N_HOST = process.env.N8N_HOST || 'localhost';
+    const N8N_PORT = parseInt(process.env.N8N_PORT || '5678', 10);
+    const N8N_PATH = process.env.N8N_WEBHOOK_PATH || '/webhook/tryon';
+
+    const payload = JSON.stringify({ user_image, product_image: product_image || '' });
+
+    console.log(`[/tryon] Forwarding to n8n at ${N8N_HOST}:${N8N_PORT}${N8N_PATH} (payload ${payload.length} bytes)`);
+
+    try {
+      const tryonRes = await new Promise((resolve, reject) => {
+        const proxyReq = http.request(
+          {
+            hostname: N8N_HOST,
+            port    : N8N_PORT,
+            path    : N8N_PATH,
+            method  : 'POST',
+            headers : {
+              'Content-Type'  : 'application/json',
+              'Content-Length': Buffer.byteLength(payload),
+            },
+          },
+          (proxyRes) => {
+            let data = '';
+            proxyRes.on('data', c => { data += c; });
+            proxyRes.on('end', () => {
+              let parsed;
+              try   { parsed = JSON.parse(data); }
+              catch { parsed = { raw: data }; }
+              resolve({ status: proxyRes.statusCode, body: parsed });
+            });
+          }
+        );
+        proxyReq.setTimeout(60000, () => { proxyReq.destroy(); reject(new Error('n8n webhook timed out after 60s')); });
+        proxyReq.on('error', reject);
+        proxyReq.write(payload);
+        proxyReq.end();
+      });
+
+      console.log(`[/tryon] n8n responded HTTP ${tryonRes.status}`);
+      if (tryonRes.status >= 200 && tryonRes.status < 300) {
+        return send(res, 200, tryonRes.body);
+      } else {
+        return send(res, tryonRes.status, { error: 'n8n webhook error', detail: tryonRes.body });
+      }
+    } catch (err) {
+      console.error('[/tryon] Proxy error:', err.message);
+      return send(res, 502, { error: 'Could not reach n8n webhook', detail: err.message });
     }
   }
 

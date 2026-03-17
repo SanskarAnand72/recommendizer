@@ -182,77 +182,121 @@ async function handleGreeting() {
   }
 }
 
-/* ── Occasion query handler ── */
+/* ── Occasion / Stylist Mode ── */
 /**
- * Step 0: Ask first clarifying question (via Groq, occasion_query intent).
- * Step 1: User answers q1 → ask a 2nd question OR go straight to search.
- * Step 2: User answers q2 → trigger product search.
- * Max 2 clarifying questions, then products are shown.
+ * Entry point: called when user mentions an occasion.
+ * Kicks off the 4-step stylist onboarding: Gender → Skin → Colors → Vibe.
  */
 async function handleOccasionQuery(input, occasion, filters = {}) {
   S.flow = 'occasion';
   S.step = 1;
-  S.data.occasionInput   = input;
-  S.data.occasion        = occasion || input;
-  S.data.occasionFilters = filters;
-  S.data.occasionAnswers = [];
+  S.data.occasion       = occasion || input;
+  S.data.occasionInput  = input;
+  S.data.stylistGender  = filters.gender || null;
+  S.data.stylistSkin    = null;
+  S.data.stylistColors  = null;
+  S.data.stylistVibe    = null;
 
+  hideTyping();
+  const msg = `Let me style a complete outfit for your ${S.data.occasion}! 🎨\nIs this for Men or Women?`;
+  pushHistory('assistant', msg);
+  addBotMsg(msg, chips([
+    ['Men',   'occasion:gender:Men'],
+    ['Women', 'occasion:gender:Women'],
+  ]));
+}
+
+async function handleOccasionStep(input) {
+  switch (S.step) {
+    case 1: {
+      // Gender received — ask skin tone
+      S.data.stylistGender = S.data.stylistGender || input;
+      S.step = 2;
+      const msg = `Great! What's your skin tone?`;
+      pushHistory('assistant', msg);
+      addBotMsg(msg, chips([
+        ['Fair',   'occasion:skin:Fair'],
+        ['Medium', 'occasion:skin:Medium'],
+        ['Dark',   'occasion:skin:Dark'],
+      ]));
+      break;
+    }
+    case 2: {
+      // Skin tone received — ask color preference
+      S.data.stylistSkin = input;
+      S.step = 3;
+      const msg = `Got it! Do you prefer lighter tones, darker shades, or both?`;
+      pushHistory('assistant', msg);
+      addBotMsg(msg, chips([
+        ['Light colors', 'occasion:colors:Light'],
+        ['Dark colors',  'occasion:colors:Dark'],
+        ['Both work',    'occasion:colors:Both'],
+      ]));
+      break;
+    }
+    case 3: {
+      // Colors received — ask vibe
+      S.data.stylistColors = input;
+      S.step = 4;
+      const msg = `Almost there! What's the vibe you're going for?`;
+      pushHistory('assistant', msg);
+      addBotMsg(msg, chips([
+        ['Casual',   'occasion:vibe:Casual'],
+        ['Stylish',  'occasion:vibe:Stylish'],
+        ['Elegant',  'occasion:vibe:Elegant'],
+        ['Party',    'occasion:vibe:Party'],
+      ]));
+      break;
+    }
+    case 4: {
+      // Vibe received — generate bundles
+      S.data.stylistVibe = input;
+      S.flow = null;
+      S.step = 0;
+      const profile = {
+        occasion: S.data.occasion,
+        gender  : S.data.stylistGender,
+        skin    : S.data.stylistSkin,
+        colors  : S.data.stylistColors,
+        vibe    : S.data.stylistVibe,
+      };
+      showTypingIndicator();
+      await handleStylistBundle(profile);
+      break;
+    }
+    default: {
+      S.flow = null; S.step = 0;
+      break;
+    }
+  }
+}
+
+async function handleStylistBundle(profile) {
   try {
-    const res = await fetch(`${PROXY}/chat`, {
+    const res = await fetch(`${PROXY}/stylist`, {
       method : 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ query: input, intent: 'occasion_query', history: chatHistory.slice(-10) }),
+      body   : JSON.stringify({ profile }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     hideTyping();
     pushHistory('assistant', data.response);
-    addBotMsg(data.response);
+
+    const seasonEmoji = { Winter: '🧥', Summer: '☀️', Monsoon: '🌧️', Mild: '🍃' };
+    const seasonNote  = data.season ? `\n\n${seasonEmoji[data.season] || '🎨'} Styled for ${data.season}` : '';
+
+    addBotMsg(data.response + seasonNote, chips([
+      ['Style Another Outfit', 'flow:occasion'],
+      ['Browse All Products',  'flow:search'],
+    ]));
   } catch (err) {
-    console.error('[handleOccasionQuery]', err);
+    console.error('[handleStylistBundle]', err);
     hideTyping();
-    addBotMsg('Sure — is this for Men or Women?', chips([['Men', 'gender:Men'], ['Women', 'gender:Women']]));
-  }
-}
-
-async function handleOccasionStep(input) {
-  S.data.occasionAnswers = S.data.occasionAnswers || [];
-  S.data.occasionAnswers.push(input);
-
-  if (S.step >= 2) {
-    // Already asked 2 questions — time to search
-    S.flow = null; S.step = 0;
-    const searchQuery = [S.data.occasion, ...S.data.occasionAnswers].join(' ');
-    showTypingIndicator();
-    await handleProductQuery(searchQuery, S.data.occasionFilters || {});
-  } else {
-    // Ask one follow-up (max), then on next answer search immediately
-    S.step = 2;  // after this, next answer always triggers search
-    showTypingIndicator();
-    try {
-      const res = await fetch(`${PROXY}/chat`, {
-        method : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body   : JSON.stringify({
-          query  : `Occasion: ${S.data.occasion}. User said: ${input}`,
-          intent : 'occasion_followup',
-          history: chatHistory.slice(-10),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      hideTyping();
-      pushHistory('assistant', data.response);
-      addBotMsg(data.response + ' Let me pull up some great options now — just tell me what you like!');
-    } catch (err) {
-      console.error('[handleOccasionStep]', err);
-      hideTyping();
-      // Skip second question and go straight to search
-      S.flow = null; S.step = 0;
-      const searchQuery = [S.data.occasion, ...S.data.occasionAnswers].join(' ');
-      showTypingIndicator();
-      await handleProductQuery(searchQuery, S.data.occasionFilters || {});
-    }
+    addBotMsg("Sorry, I had trouble building your outfit. Let me try again!", chips([
+      ['Try Again',        'flow:occasion'],
+      ['Browse Products',  'flow:search'],
+    ]));
   }
 }
 
@@ -474,14 +518,159 @@ function buildProductCard({ name, price, rating, imageUrl, prodUrl, isLast }) {
   return row;
 }
 
-/**
- * Try On — placeholder UI (future: photo upload + overlay)
- */
-function launchTryOn(productName, productImage) {
+/* ══════════════════════════════════════════════════════════════
+   VIRTUAL TRY-ON
+   Flow: launchTryOn → showUploadUI → handleUserPhoto → callTryOnWebhook → showTryOnResult
+══════════════════════════════════════════════════════════════ */
+
+// Try-on request goes through our own proxy (avoids CORS; proxy forwards to n8n)
+const TRYON_WEBHOOK = `${PROXY}/tryon`;
+
+/** Called when user taps "Try On" on any product card */
+function launchTryOn(productName, productImageUrl) {
+  S.data.tryOnProductName  = productName;
+  S.data.tryOnProductImage = productImageUrl;
   goToChat();
-  addBotMsg(`Virtual Try-On for <b>${productName}</b> is coming soon. You will be able to upload your photo and see the product on you.`,
-    chips([['Find More Products', 'flow:search'], ['View Offers', 'flow:offers']])
-  );
+  showTryOnUploadUI(productName);
+}
+
+/** Renders the photo-upload card into the chat */
+function showTryOnUploadUI(productName) {
+  const row  = makeRow('bot');
+  const wrap = row.querySelector('.cw-msg-wrap');
+
+  const bubble = document.createElement('div');
+  bubble.className = 'cw-bubble bot';
+  bubble.innerHTML = `
+    <div class="cw-tryon-intro">
+      <span class="cw-tryon-icon">👗</span>
+      <b>Virtual Try-On</b>
+      <span class="cw-tryon-sub">Let's see how <em>${productName}</em> looks on you!</span>
+    </div>
+    <label class="cw-upload-label" id="cwTryOnUploadLabel">
+      <input type="file" id="cwTryOnFileInput" accept="image/*" style="display:none" />
+      <div class="cw-upload-box" id="cwUploadBox">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#C8102E" stroke-width="1.8">
+          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <span class="cw-upload-hint">Upload your photo</span>
+        <span class="cw-upload-sub">Front-facing preferred · JPG or PNG</span>
+      </div>
+    </label>`;
+
+  const t = document.createElement('span');
+  t.className = 'cw-msg-time'; t.textContent = now();
+
+  wrap.appendChild(bubble);
+  wrap.appendChild(t);
+  cwMessages.appendChild(row);
+  scrollBottom();
+
+  // Wire file input
+  const fileInput = bubble.querySelector('#cwTryOnFileInput');
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    // Show preview inside the box
+    const uploadBox = bubble.querySelector('#cwUploadBox');
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const dataUrl = e.target.result;
+      uploadBox.innerHTML = `
+        <img src="${dataUrl}" style="width:80px;height:80px;object-fit:cover;border-radius:10px;margin-bottom:4px" />
+        <span class="cw-upload-hint" style="color:#16a34a">✓ Photo selected</span>`;
+      uploadBox.style.border = '2px solid #16a34a';
+
+      // Kick off webhook call after brief delay
+      await delay(400);
+      await handleUserPhoto(dataUrl);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Converts uploaded photo to base64, then calls webhook */
+async function handleUserPhoto(userImageDataUrl) {
+  addUserMsg('Photo uploaded ✓');
+  showTypingIndicator();
+
+  const productImage = S.data.tryOnProductImage || '';
+  const productName  = S.data.tryOnProductName  || 'Product';
+
+  // Show a nice processing message
+  await delay(600);
+  hideTyping();
+  addBotMsg('✨ Generating your virtual try-on… this may take a few seconds.');
+  showTypingIndicator();
+
+  await callTryOnWebhook(userImageDataUrl, productImage, productName);
+}
+
+/** POSTs to n8n webhook and shows result */
+async function callTryOnWebhook(userImage, productImage, productName) {
+  try {
+    const res = await fetch(TRYON_WEBHOOK, {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({ user_image: userImage, product_image: productImage }),
+    });
+
+    if (!res.ok) throw new Error(`Webhook HTTP ${res.status}`);
+
+    const data = await res.json();
+    hideTyping();
+    showTryOnResult(data, productName, productImage);
+
+  } catch (err) {
+    hideTyping();
+    console.error('[TryOn Webhook]', err);
+    addBotMsg('Something went wrong, please try again.', chips([
+      ['Try Again', `tryon-retry:${productName}`],
+      ['Browse Products', 'flow:search'],
+    ]));
+  }
+}
+
+/** Renders the generated try-on image and follow-up chips */
+function showTryOnResult(data, productName, productImage) {
+  // Accept result_image / output_image / image / url from the webhook
+  const resultUrl = data.result_image || data.output_image || data.image || data.url || '';
+
+  addBotMsg(`Here's how this will look on you 👇`);
+
+  const row  = makeRow('bot');
+  const wrap = row.querySelector('.cw-msg-wrap');
+
+  const card = document.createElement('div');
+  card.className = 'cw-tryon-result-card';
+
+  if (resultUrl) {
+    card.innerHTML = `
+      <img src="${resultUrl}" alt="Virtual Try-On Result" class="cw-tryon-result-img"
+           onerror="this.parentElement.innerHTML='<span style=\'color:#ef4444;font-size:.82rem\'>Could not load try-on image.</span>'" />
+      <div class="cw-tryon-result-label">✦ AI-Generated Try-On</div>`;
+  } else {
+    // Fallback: show product image if webhook doesn't return a result URL
+    card.innerHTML = `
+      <div class="cw-tryon-no-result">
+        <span style="font-size:1.3rem">🤔</span>
+        <span>Try-on image not returned by server.<br>Check your n8n workflow output.</span>
+      </div>`;
+  }
+
+  const t = document.createElement('span');
+  t.className = 'cw-msg-time'; t.textContent = now();
+
+  wrap.appendChild(card);
+  wrap.appendChild(chips([
+    ['Try Another Product', 'flow:search'],
+    ['Buy Now',            `buylink:${productImage}`],
+  ]));
+  wrap.appendChild(t);
+  cwMessages.appendChild(row);
+  scrollBottom();
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -616,11 +805,30 @@ function sendMsg() {
 ══════════════════════════════════════════════════════════════ */
 
 function routeInput(input) {
-  // ── Chip shortcuts ──
+  // ── Chip shortcuts — bypass Groq intent, go straight to product search ──
   if (input.startsWith('search:')) {
-    const q = input.slice(7);
-    // Route through the full intent pipeline — never bypass category validation
-    processMessage(q);
+    const q       = input.slice(7).trim();              // e.g. "mens jackets"
+    const lower   = q.toLowerCase();
+
+    // Parse gender from chip text
+    let gender = null;
+    if (lower.startsWith('mens') || lower.startsWith("men's"))         gender = 'Men';
+    else if (lower.startsWith('womens') || lower.startsWith("women's")) gender = 'Women';
+
+    // Parse category — last word(s) of chip text
+    const KNOWN_CATS = ['jeans','shirts','jackets','trousers','tshirts','sweatshirts','sweaters','tops','shorts','footwear'];
+    let category = null;
+    for (const cat of KNOWN_CATS) {
+      if (lower.includes(cat) || lower.includes(cat.slice(0,-1))) { category = cat; break; }
+    }
+
+    const filters = {};
+    if (gender)   filters.gender   = gender;
+    if (category) filters.category = category;
+
+    pushHistory('user', q);
+    showTypingIndicator();
+    handleProductQuery(q, filters);
     return;
   }
 
@@ -640,12 +848,46 @@ function routeInput(input) {
     if (f === 'track') { S.flow = 'track'; S.step = 1; S.data = {}; addBotMsg('Enter your <b>Order ID</b>:'); return; }
     if (f === 'tryon') { S.flow = 'tryon'; S.step = 0; S.data = {}; startTryOn(); return; }
     if (f === 'offers') { switchToTab('Offers'); renderOffers(); return; }
-    if (f === 'search') { addBotMsg('What are you looking for? Type a style, color, or category.'); S.flow = 'chat'; return; }
-    if (f === 'home') { S.flow = null; switchScreen('Home'); cwTabs.forEach(t => t.classList.toggle('active', t.dataset.scr === 'Home')); return; }
+    if (f === 'search')  { addBotMsg('What are you looking for? Type a style, color, or category.'); S.flow = 'chat'; return; }
+    if (f === 'home')    { S.flow = null; switchScreen('Home'); cwTabs.forEach(t => t.classList.toggle('active', t.dataset.scr === 'Home')); return; }
+    if (f === 'occasion') {
+      S.flow = null; S.step = 0; S.data = {};
+      addBotMsg("What's the occasion? 🎉 Tell me — date night, party, wedding, office, casual outing...");
+      return;
+    }
   }
 
   if (input.startsWith('human:')) { handleHumanReason(input.slice(6)); return; }
   if (input.startsWith('tryon:')) { handleTryOnChip(input.slice(6)); return; }
+  if (input.startsWith('tryon-retry:')) {
+    const name = input.slice(12);
+    showTryOnUploadUI(name || S.data.tryOnProductName || 'Product');
+    return;
+  }
+
+  // ── Occasion stylist chip (occasion:gender:Men / occasion:skin:Fair / etc.) ──
+  if (input.startsWith('occasion:')) {
+    const rest   = input.slice(9);                // 'gender:Men'
+    const sepIdx = rest.indexOf(':');
+    if (sepIdx !== -1) {
+      const key   = rest.slice(0, sepIdx);        // 'gender'
+      const value = rest.slice(sepIdx + 1);       // 'Men'
+      const keyMap = {
+        gender: 'stylistGender',
+        skin  : 'stylistSkin',
+        colors: 'stylistColors',
+        vibe  : 'stylistVibe',
+      };
+      if (keyMap[key]) S.data[keyMap[key]] = value;
+      handleOccasionStep(value).catch(err => {
+        console.error('[occasion chip]', err);
+        hideTyping();
+        addBotMsg('Something went wrong. Let me start over!');
+        S.flow = null; S.step = 0;
+      });
+    }
+    return;
+  }
 
   // ── Active flows ──
   if (S.flow === 'track') { handleTrack(input); return; }
